@@ -22,8 +22,8 @@ fn execute(code: &Vec<char>, pc: &mut usize, memory: &mut Vec<u8>, dc:&mut usize
     match code[*pc] {
         '>' => *dc += 1,
         '<' => *dc -= 1,
-        '+' => memory[*dc] += 1,
-        '-' => memory[*dc] -= 1,
+        '+' => memory[*dc] = memory[*dc].wrapping_add(1),
+        '-' => memory[*dc] = memory[*dc].wrapping_sub(1),
         '.' => {
             print!("{}", memory[*dc] as char);
             io::stdout().flush().unwrap();
