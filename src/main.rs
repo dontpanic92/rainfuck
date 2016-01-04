@@ -3,22 +3,9 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::fs::File;
 use std::env;
+use std::collections::HashMap;
 
-fn find_match<F: FnMut() -> char>(target_char: char, matched_char: char, next: &mut F) {
-    let mut accu = 1;
-    loop {
-        match next() {
-            c if c == matched_char => accu += 1,
-            c if c == target_char => accu -= 1,
-            _ => ()
-        }
-        if accu == 0 {
-            break;
-        }
-    }
-}
-
-fn execute(code: &Vec<char>, pc: &mut usize, memory: &mut Vec<u8>, dc:&mut usize) {
+fn execute(code: &Vec<char>, pc: &mut usize, memory: &mut Vec<u8>, dc:&mut usize, brackets_cache: &mut HashMap<usize, usize>) {
     match code[*pc] {
         '>' => *dc += 1,
         '<' => *dc -= 1,
@@ -34,15 +21,34 @@ fn execute(code: &Vec<char>, pc: &mut usize, memory: &mut Vec<u8>, dc:&mut usize
             memory[*dc] = tmp_str.chars().next().unwrap() as u8;
         },
         '[' => if memory[*dc] == 0 {
-            find_match(']', '[', &mut || {*pc += 1;code[*pc]});
+            *pc = *brackets_cache.get(pc).unwrap();
         },
-        ']' => if memory[*dc] != 0{
-            find_match('[', ']', &mut || {*pc -= 1;code[*pc]});
+        ']' => if memory[*dc] != 0 {
+            *pc = *brackets_cache.get(pc).unwrap();
         },
         _ => ()
     }
 
     *pc += 1
+}
+
+fn fill_brackets_cache(code: &Vec<char>, brackets_cache: &mut HashMap<usize, usize>) {
+    let mut stack = Vec::new();
+
+    for index in 0..code.len() {
+        match code[index] {
+            '[' => stack.push(index),
+            ']' => {
+                let left = match stack.pop(){
+                    Some(i) => i,
+                    _ => panic!("Unmatched brackets at position {}", index)
+                };
+                brackets_cache.insert(left, index);
+                brackets_cache.insert(index, left);
+            },
+            _ => ()
+        }
+    }
 }
 
 fn interpret_file(path:& String) {
@@ -59,13 +65,17 @@ fn interpret_file(path:& String) {
     };
 
     let mut fin = BufReader::new(file);
-
     fin.read_to_string(&mut code_buffer).unwrap();
+
 
     let code: Vec<char> = code_buffer.chars().collect();
     let mut code_pointer: usize = 0;
+
+    let mut brackets_cache = HashMap::new();
+    fill_brackets_cache(&code, &mut brackets_cache);
+
     loop {
-        execute(&code, &mut code_pointer, &mut memory, &mut mem_pointer);
+        execute(&code, &mut code_pointer, &mut memory, &mut mem_pointer, &mut brackets_cache);
         if code_pointer >= code.len() {
             break;
         }

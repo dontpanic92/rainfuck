@@ -1,0 +1,9 @@
+[package]
+
+name = "rainfuck"
+version = "0.0.1"
+authors = [ "dontpanic <lishengqiu.hit@gmail.com>" ]
+
+[dependencies]
+
+libc = "*"
