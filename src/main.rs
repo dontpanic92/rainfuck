@@ -4,7 +4,7 @@ use std::io::prelude::*;
 use std::io::BufReader;
 
 mod interpreter;
-mod jit_compiler;
+mod jit_compiler_x64;
 
 fn read_file(path: &String) -> String{
     let mut code_buffer = String::new();
@@ -22,7 +22,7 @@ fn read_file(path: &String) -> String{
 }
 
 fn main() {
-    let mut j = jit_compiler::JitCompiler::new();
+    let mut j = jit_compiler_x64::JitCompiler::new();
     j.compile("");
 
     let args: Vec<String> = env::args().collect();
