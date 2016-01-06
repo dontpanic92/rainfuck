@@ -3,9 +3,9 @@ extern crate libc;
 extern {
     fn memcpy(dest: *mut libc::c_void, srouce: *mut libc::c_void, n: libc::size_t) -> *mut libc::c_void;
     fn putchar(ch: libc::c_int) -> libc::c_int;
-    fn getchar() -> libc::c_int;
 }
 
+use std;
 use std::mem;
 use std::slice;
 use std::collections::HashMap;
@@ -20,6 +20,11 @@ enum Reg{
     Rsp
 }
 
+enum Jump {
+    Jmp,
+    Jz
+}
+
 enum PanicReason {
     MemoryError,
     NotSupported
@@ -31,7 +36,12 @@ struct JitCode {
     code_size: usize,
     buf_size: usize,
     page_size: usize,
-    reloc_tbl: HashMap<usize, u64>
+
+    //In reloc_tbl the dest is absolute address
+    reloc_tbl: HashMap<usize, u64>,
+
+    //In patch_tbl the dest is offset to machine_code
+    patch_tbl: HashMap<usize, usize>
 }
 
 impl JitCode {
@@ -41,7 +51,8 @@ impl JitCode {
                 code_size: 0,
                 page_size: 0,
                 buf_size: 0,
-                reloc_tbl: HashMap::new()};
+                reloc_tbl: HashMap::new(),
+                patch_tbl: HashMap::new()};
         jc.expand_buffer();
         jc
     }
@@ -99,6 +110,8 @@ impl JitCode {
     fn emit_push_r(&mut self, op: Reg) {
         match op {
             Reg::Rbp => self.emit_code(&[0x55]),
+            Reg::Rdx => self.emit_code(&[0x52]),
+            Reg::Rbx => self.emit_code(&[0x53]),
             _ => JitCode::panic(PanicReason::NotSupported)
         }
     }
@@ -109,6 +122,9 @@ impl JitCode {
             (Reg::Rsp, Reg::Rbp) => self.emit_code(&[0x48, 0x89, 0xEC]),
             (Reg::Rdx, Reg::Rdi) => self.emit_code(&[0x48, 0x89, 0xFA]),
             (Reg::Rdi, Reg::Rax) => self.emit_code(&[0x48, 0x89, 0xC7]),
+            (Reg::Rdi, Reg::Rbx) => self.emit_code(&[0x48, 0x89, 0xDF]),
+            (Reg::Rdi, Reg::Rcx) => self.emit_code(&[0x48, 0x89, 0xCF]),
+            (Reg::Rdi, Reg::Rdx) => self.emit_code(&[0x48, 0x89, 0xD7]),
             _ => JitCode::panic(PanicReason::NotSupported)
         }
     }
@@ -168,6 +184,8 @@ impl JitCode {
     fn emit_pop_r(&mut self, op: Reg) {
         match op {
             Reg::Rbp => self.emit_code(&[0x5D]),
+            Reg::Rbx => self.emit_code(&[0x5B]),
+            Reg::Rdx => self.emit_code(&[0x5A]),
             _ => JitCode::panic(PanicReason::NotSupported)
         }
     }
@@ -176,25 +194,53 @@ impl JitCode {
         self.emit_code(&[0xC3]);
     }
 
-    fn reloc(&mut self) {
-        for (addr, dest) in &self.reloc_tbl {
-            let code_addr = self.machine_code as u64 + *addr as u64;
-            let offset = (*dest as i64) - (code_addr as i64) - 4;
-            if !JitCode::imm_is_i32(offset) {
-                panic!("Too far to call a subroutine, from 0x{:X} call 0x{:X}", code_addr, dest);
-            }
+    fn emit_jmp_with_patchback(&mut self, jump_type: Jump) -> usize{
+        match jump_type {
+            Jump::Jz => self.emit_code(&[0x0F, 0x84]),
+            Jump::Jmp => self.emit_code(&[0xE9])
+        }
+        let patch_addr = self.code_size;
+        self.emit_code(&[0x12, 0x34, 0x56, 0x78]);
+        patch_addr
+    }
 
-            let le_offset = (offset as i32).to_le();
-            let code = JitCode::get_raw_slice(&le_offset);
-            unsafe {
-                for i in 0..code.len() {
-                    *self.machine_code.offset((*addr + i) as isize) = code[i];
-                }
+    fn patch(&mut self, patch_addr: usize, dest: usize) {
+        self.patch_tbl.insert(patch_addr, dest);
+    }
+
+    fn fill_offset(&self, addr: usize, offset: i64) {
+        if !JitCode::imm_is_i32(offset) {
+            panic!("Too far to call a subroutine");
+        }
+
+        let le_offset = (offset as i32).to_le();
+        let code = JitCode::get_raw_slice(&le_offset);
+        unsafe {
+            for i in 0..code.len() {
+                *self.machine_code.offset((addr + i) as isize) = code[i];
             }
         }
     }
 
+    fn reloc(&mut self) {
+        for (addr, dest) in &self.reloc_tbl {
+            let code_addr = self.machine_code as u64 + *addr as u64;
+            let offset = (*dest as i64) - (code_addr as i64) - 4;
+            self.fill_offset(*addr, offset);
+        }
+    }
+
+    fn patch_back(&mut self) {
+        for (addr, dest) in &self.patch_tbl {
+            let code_addr = self.machine_code as u64 + *addr as u64;
+            let dest_addr = self.machine_code as u64 + *dest as u64;
+            let offset = (dest_addr as i64) - (code_addr as i64) - 4;
+            self.fill_offset(*addr, offset);
+        }
+    }
+
     fn function(&mut self) -> *const u8 {
+        self.patch_back();
         self.reloc();
         unsafe {
             libc::mprotect(mem::transmute(self.machine_code), self.buf_size, libc::PROT_READ | libc::PROT_EXEC);
@@ -242,6 +288,16 @@ pub struct JitCompiler {
     jit_code: JitCode
 }
 
+extern "C" fn test(t: i64) {
+    println!("0x{:X}", t);
+}
+
+extern "C" fn _getchar() -> i32 {
+    let mut tmp_str = String::new();
+    std::io::stdin().read_line(&mut tmp_str).unwrap();
+    tmp_str.chars().next().unwrap() as i32
+}
+
 impl JitCompiler {
     pub fn new() -> JitCompiler {
         JitCompiler {jit_code: JitCode::new()}
@@ -255,36 +311,67 @@ impl JitCompiler {
         self.jit_code.emit_dec_r(Reg::Rbx);
     }
 
+    fn emit_push_regs(&mut self) {
+        self.jit_code.emit_push_r(Reg::Rbx);
+        self.jit_code.emit_push_r(Reg::Rdx);
+    }
+
+    fn emit_pop_regs(&mut self) {
+        self.jit_code.emit_pop_r(Reg::Rdx);
+        self.jit_code.emit_pop_r(Reg::Rbx);
+    }
+
     fn emit_putchar(&mut self) {
-        //Todo: mov rdi
+        self.emit_push_regs();
+
+        self.jit_code.emit_mov_ri(Reg::Rcx, 0);
+        self.jit_code.emit_code(&[0x8A, 0x0C, 0x1A]); //mov cl, BYTE PTR [rdx+rbx*1]
+        self.jit_code.emit_mov_rr(Reg::Rdi, Reg::Rcx);
         self.jit_code.emit_mov_ri(Reg::Rcx, unsafe {mem::transmute(putchar)});
         self.jit_code.emit_call_r(Reg::Rcx);
+
+        self.emit_pop_regs();
+    }
+
+    fn debug_print_reg(&mut self, reg: Reg) {
+        self.emit_push_regs();
+        self.jit_code.emit_mov_rr(Reg::Rdi, reg);
+        self.jit_code.emit_mov_ri(Reg::Rcx, unsafe {mem::transmute(test)});
+        self.jit_code.emit_call_r(Reg::Rcx);
+        self.emit_pop_regs();
     }
 
     fn emit_getchar(&mut self) {
-        self.jit_code.emit_mov_ri(Reg::Rcx, unsafe {mem::transmute(getchar)});
+        self.emit_push_regs();
+
+        self.jit_code.emit_mov_ri(Reg::Rcx, unsafe {mem::transmute(_getchar)});
         self.jit_code.emit_call_r(Reg::Rcx);
+        self.emit_pop_regs();
+
+        self.jit_code.emit_code(&[0x88, 0x04, 0x1a]); //mov BYTE PTR [rdx+rbx*1], al
     }
 
     fn emit_data_inc(&mut self) {
-        self.jit_code.emit_code(&[0x48, 0x8B, 0x0C, 0x1A]); //mov rcx,QWORD PTR [rdx+rbx*1]
+        self.jit_code.emit_code(&[0x8A, 0x0C, 0x1A]); //mov cl, BYTE PTR [rdx+rbx*1]
         self.jit_code.emit_inc_r(Reg::Rcx);
-        self.jit_code.emit_code(&[0x48, 0x89, 0x0C, 0x1A]); //mov QWORD PTR [rdx+rbx*1],rcx
+        self.jit_code.emit_code(&[0x88, 0x0C, 0x1A]); //mov BYTE PTR [rdx+rbx*1], cl
     }
 
     fn emit_data_dec(&mut self) {
-        self.jit_code.emit_code(&[0x48, 0x8B, 0x0C, 0x1A]); //mov rcx,QWORD PTR [rdx+rbx*1]
+        self.jit_code.emit_code(&[0x8A, 0x0C, 0x1A]); //mov cl, BYTE PTR [rdx+rbx*1]
         self.jit_code.emit_dec_r(Reg::Rcx);
-        self.jit_code.emit_code(&[0x48, 0x89, 0x0C, 0x1A]); //mov QWORD PTR [rdx+rbx*1],rcx
+        self.jit_code.emit_code(&[0x88, 0x0C, 0x1A]); //mov BYTE PTR [rdx+rbx*1], cl
     }
 
-    pub fn compile(&mut self, code: &str) {
+    pub fn compile_and_run(&mut self, code: &str) {
         self.jit_code.emit_push_r(Reg::Rbp);
         self.jit_code.emit_mov_rr(Reg::Rbp, Reg::Rsp);
+        self.emit_push_regs();
         self.jit_code.emit_mov_ri(Reg::Rbx, 0); //Rbx = data_pointer
         self.jit_code.emit_mov_rr(Reg::Rdx, Reg::Rdi); //Rdx = memory_base
 
         let mut memory: Vec<u8>= vec![0; 10000];
+        let mut stack = Vec::new();
         for ch in code.chars() {
             match ch {
                 '>' => self.emit_move_next(),
@@ -293,15 +380,35 @@ impl JitCompiler {
                 '-' => self.emit_data_dec(),
                 '.' => self.emit_putchar(),
                 ',' => self.emit_getchar(),
-                //'[' =>,
-                //']' =>,
+                '[' => {
+                    let pc = self.jit_code.code_size;
+                    self.jit_code.emit_mov_ri(Reg::Rcx, 0);
+                    self.jit_code.emit_code(&[0x8A, 0x0C, 0x1A]); //mov cl, BYTE PTR [rdx+rbx*1]
+                    self.jit_code.emit_code(&[0x84, 0xC9]); //test cl, cl
+                    let patch = self.jit_code.emit_jmp_with_patchback(Jump::Jz);
+                    stack.push((pc, patch));
+                    self.jit_code.emit_dec_r(Reg::Rcx);
+                },
+                ']' => {
+                    match stack.pop() {
+                        Some((pc, patch)) => {
+                            let p = self.jit_code.emit_jmp_with_patchback(Jump::Jmp);
+                            self.jit_code.patch(p, pc);
+                            let dest = self.jit_code.code_size;
+                            self.jit_code.patch(patch, dest);
+                        },
+                        _ => panic!("Unmatched brackets")
+                    }
+
+                },
                 _ => ()
             }
         }
+        self.emit_pop_regs();
         self.jit_code.emit_mov_rr(Reg::Rsp, Reg::Rbp);
         self.jit_code.emit_pop_r(Reg::Rbp);
         self.jit_code.emit_ret();
-        let func: fn()->i64 = unsafe { mem::transmute(self.jit_code.function()) };
-        println!("{}", func());
+        let func: extern "C" fn(*mut u8) = unsafe { mem::transmute(self.jit_code.function()) };
+        func(memory.as_mut_ptr());
     }
 }

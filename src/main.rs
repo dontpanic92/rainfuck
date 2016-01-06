@@ -6,6 +6,8 @@ use std::io::BufReader;
 mod interpreter;
 mod jit_compiler_x64;
 
+const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
 fn read_file(path: &String) -> String{
     let mut code_buffer = String::new();
 
@@ -22,13 +24,14 @@ fn read_file(path: &String) -> String{
 }
 
 fn main() {
-    let mut j = jit_compiler_x64::JitCompiler::new();
-    j.compile("");
-
     let args: Vec<String> = env::args().collect();
-    if args.len() > 1 {
-        interpreter::interpret(&read_file(&args[1]));
+    if args.len() > 2 && args[1] == "--no-jit" {
+        interpreter::interpret(&read_file(&args[2]));
+    } else if args.len() > 1 {
+        let mut j = jit_compiler_x64::JitCompiler::new();
+        j.compile_and_run(&read_file(&args[1]));
     } else {
-        println!("Usage: {} program.bf", args[0]);
+        println!("Rainfuck version {}\n", VERSION);
+        println!("Usage: {} [--no-jit] program.bf", args[0]);
     }
 }
