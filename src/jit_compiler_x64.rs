@@ -329,6 +329,8 @@ impl JitCompiler {
         self.jit_code.emit_mov_rr(Reg::Rdi, Reg::Rcx);
         self.jit_code.emit_mov_ri(Reg::Rcx, unsafe {mem::transmute(putchar)});
         self.jit_code.emit_call_r(Reg::Rcx);
+        self.jit_code.emit_mov_ri(Reg::Rcx, unsafe {mem::transmute(libc::fflush)});
+        self.jit_code.emit_call_r(Reg::Rcx);
 
         self.emit_pop_regs();
     }
